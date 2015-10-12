@@ -1,3 +1,7 @@
+/**
+ * Copyright (c) 2014, WonderBuilders, Inc., All Rights Reserved
+ */
+
 /*
  * Copyright (c) 2003-2009 jMonkeyEngine
  * All rights reserved.
@@ -600,6 +604,75 @@ public class RenderQueue {
     }
 
     /**
+     * For transparent objects, the glow was not rendering properly.
+     * So we have created the separate method for transparent objects.
+     * @param s
+     * @param face 
+     */
+    private void drawWithGlowForTransparent(Geometry s, CullState.Face face) {
+
+        final GL2 gl = GLU.getCurrentGL().getGL2();
+
+        RenderState oldCullState = s.states[RenderState.StateType.Cull.ordinal()];
+        ZBufferState oldZState = (ZBufferState) s.states[RenderState.StateType.ZBuffer.ordinal()];
+        StencilState oss = (StencilState) s.states[RenderState.StateType.Stencil.ordinal()];
+        TextureState ots = (TextureState) s.states[RenderState.StateType.Texture.ordinal()];
+        LightState ols = (LightState) s.states[RenderState.StateType.Light.ordinal()];
+
+        s.states[RenderState.StateType.Cull.ordinal()] = tranCull;
+        s.states[RenderState.StateType.ZBuffer.ordinal()] = tranZBuff;
+        glowStencilState.setStencilFunction(StencilState.StencilFunction.Always);
+        glowStencilState.setStencilReference(currentStencilValue);
+        glowStencilState.setStencilOpFail(StencilState.StencilOperation.Keep);
+        glowStencilState.setStencilOpZPass(StencilState.StencilOperation.Replace);
+        glowStencilState.setStencilOpZFail(StencilState.StencilOperation.Keep);
+        s.states[RenderState.StateType.Stencil.ordinal()] = glowStencilState;
+        tranCull.setCullFace(face);
+
+        s.draw(renderer);
+
+        // Set up glow states
+        glowStencilState.setStencilFunction(StencilState.StencilFunction.NotEqualTo);
+        glowStencilState.setStencilReference(currentStencilValue);
+        glowStencilState.setStencilOpFail(StencilState.StencilOperation.Keep);
+        glowStencilState.setStencilOpZPass(StencilState.StencilOperation.Keep);
+        glowStencilState.setStencilOpZFail(StencilState.StencilOperation.Keep);
+
+        oDefaultColor = s.getDefaultColor();
+        s.setDefaultColor(s.getGlowColor());
+
+        // then render front-facing tris only
+        s.states[RenderState.StateType.ZBuffer.ordinal()] = oldZState;
+        s.states[RenderState.StateType.Texture.ordinal()] = glowTextureState;
+        s.states[RenderState.StateType.Light.ordinal()] = glowLightState;
+        s.states[RenderState.StateType.Stencil.ordinal()] = glowStencilState;
+        tranCull.setCullFace(face);
+
+        gl.glPushMatrix();
+        BoundingVolume bv = s.getWorldBound();
+        float dx = -(bv.getCenter().x);
+        float dy = -(bv.getCenter().y);
+        float dz = -(bv.getCenter().z);
+
+        gl.glTranslatef(-dx, -dy, -dz);
+        gl.glScalef(s.getGlowScale().x, s.getGlowScale().y, s.getGlowScale().z);
+        gl.glTranslatef(dx, dy, dz);
+
+        // Draw again
+        s.draw(renderer);
+
+        gl.glPopMatrix();
+        
+        // Restore
+        s.states[RenderState.StateType.Cull.ordinal()] = oldCullState;
+        s.states[RenderState.StateType.Stencil.ordinal()] = oss;
+        s.states[RenderState.StateType.Texture.ordinal()] = ots;
+        s.states[RenderState.StateType.Light.ordinal()] = ols;
+        s.setDefaultColor(oDefaultColor);
+        currentStencilValue++;
+    }
+
+    /**
      * Renders the transparent buckets. Those farthest from the camera are
      * rendered first. Note that any items in the transparent bucket will
      * have their cullstate values overridden. Therefore, any settings assigned
@@ -612,11 +685,11 @@ public class RenderQueue {
 
                 if (twoPassTransparent && obj instanceof Geometry) {
                     /**
-                     * Wishtree Technologies
                      * Glow effect added to transparent objects
                      */
                     if(obj.isGlowEnabled()) {
-                        drawWithGlow((Geometry)obj);
+                        drawWithGlowForTransparent((Geometry)obj,CullState.Face.Front);
+                        drawWithGlowForTransparent((Geometry)obj,CullState.Face.Back);
                     } else {
                         Geometry geom = (Geometry)obj;
                         RenderState oldCullState = geom.states[RenderState.StateType.Cull.ordinal()];
@@ -787,15 +860,40 @@ public class RenderQueue {
     private class TransparentComp implements Comparator<Spatial> {
 
         public int compare(Spatial o1, Spatial o2) {
-            // sort by distance to the edge of the object's bounds
-            float d1 = distanceToCam(o1);
-            float d2 = distanceToCam(o2);
-            if (d1 == d2)
+            /*
+             * "ShadowQuad" is the name of the avatar shadow entity.
+             * We have to rendered it first which ever entity is compared to it
+             */
+//            System.out.println("o1 : "+o1.getName()+" | "+o1.hashCode());
+//            System.out.println("o2 : "+o2.getName()+" | "+o2.hashCode());
+            if(o1.getName().equals("ShadowQuad") && 
+                    o2.getName().equals("ShadowQuad")) {
+//                System.out.println("return 0...");
                 return 0;
-            else if (d1 < d2)
+            } else if (o1.getName().equals("ShadowQuad")) {
+//                System.out.println("return 1...");
                 return 1;
-            else
+            } else if (o2.getName().equals("ShadowQuad")) {
+//                System.out.println("return -1...");
                 return -1;
+            } else {
+                /*
+                 * There is an issue when a transparent object is followed by another transparent object.
+                 * In this case, sometimes the order in which the objects rendered was wrong.
+                 * So use the distance between the cam and the edge of object
+                 * instead of the distance between cam and the center of the object
+                 */
+                // sort by distance to the edge of the object's bounds
+                float d1 = edgeDistanceToCam(o1);
+                float d2 = edgeDistanceToCam(o2);
+                if (d1 == d2) {
+                    return 0;
+                } else if (d1 < d2) {
+                    return 1;
+                } else {
+                    return -1;
+                }
+            }
         }
     }
 
